@@ -1,0 +1,168 @@
+Procedimiento llamado MostrarAlmacenamientoUsuario que reciba el nombre de un usuario y devuelva el espacio que ocupan sus objetos agrupando por dispositivos y archivos:
+
+				Usuario: NombreUsuario
+
+					Dispositivo:xxxx
+
+						Archivo: xxxxxxx.xxx
+
+								Tabla1......nnn K
+								…
+								TablaN......nnn K
+								Indice1.....nnn K
+								…
+								IndiceN.....nnn K
+
+						Total Espacio en Archivo xxxxxxx.xxx: nnnnn K
+
+						Archivo:...
+						…
+
+
+
+					Total Espacio en Dispositivo xxxx: nnnnnn K
+
+					Dispositivo: yyyy
+					…
+
+				Total Espacio Usuario en la BD: nnnnnnn K
+
+
+create or replace package infoUserSpace
+as
+
+  procedure execute(p_user varchar2);
+  procedure checkUser(p_user varchar2);
+  procedure tablespacesUser(p_user varchar2);
+  procedure tableUserTS(p_user varchar2,p_tablespace varchar2,p_filename varchar2,v_sumUsed in out number,v_sumAllocated in out number);
+  procedure infoTableSize(p_owner varchar2,p_table varchar2,p_used in out number,p_allocated in out number);
+
+end infoUserSpace;
+/
+
+create or replace package body infoUserSpace
+as
+
+procedure execute(p_user varchar2)
+is
+
+begin
+
+checkUser(p_user);
+tablespacesUser(p_user);
+
+end execute;
+
+procedure checkUser(p_user varchar2)
+is
+
+  v_user number;
+
+begin
+
+  select count(username) into v_user
+  from dba_users
+  where username=p_user;
+
+  if v_user=0 then
+    raise_application_error(-20001,'User does not exist');
+  end if;
+
+end checkUser;
+
+procedure tablespacesUser(p_user varchar2)
+is
+
+  cursor c_tablespacesUser is
+  select distinct file_name,ddf.tablespace_name
+  from dba_tables ds,dba_data_files ddf
+  where owner=p_user
+  and ds.tablespace_name=ddf.tablespace_name;
+
+  v_used number:=0;
+  v_sumUsed number:=0;
+  v_allocated number:=0;
+  v_sumAllocated number:=0;
+
+begin
+
+  dbms_output.put_line('Usuario: '||p_user);
+
+  for usertablespace in c_tablespacesUser loop
+    tableUserTS(p_user,usertablespace.tablespace_name,usertablespace.file_name,v_used,v_allocated);
+    v_sumUsed:=v_sumUsed+v_used;
+    v_sumAllocated:=v_sumAllocated+v_allocated;
+  end loop;
+
+  dbms_output.put_line('Total Espacio Usuario en la BD: '||v_sumAllocated||' KB reservados, '||v_sumUsed||' KB usados');
+
+end tablespacesUser;
+
+procedure tableUserTS(p_user varchar2,p_tablespace varchar2,p_filename varchar2,v_sumUsed in out number,v_sumAllocated in out number)
+is
+
+  cursor c_tableUserTS is
+  select table_name
+  from dba_tables
+  where owner=p_user
+  and tablespace_name=p_tablespace;
+
+  v_used number:=0;
+  v_allocated number:=0;
+
+begin
+
+  dbms_output.put_line('Archivo: '||p_filename);
+
+  for usertable in c_tableUserTS loop
+    infoTableSize(p_user,usertable.table_name,v_used,v_allocated);
+    v_sumUsed:=v_sumUsed+v_used;
+    v_sumAllocated:=v_sumAllocated+v_allocated;
+  end loop;
+
+  dbms_output.put_line('Total Espacio en Archivo '||p_filename||': '||v_sumAllocated||' KB reservados, '||v_sumUsed||' KB usados');
+
+end tableUserTS;
+
+procedure infoTableSize(p_owner varchar2,p_table varchar2,p_used in out number,p_allocated in out number)
+is
+
+begin
+
+  execute immediate 'analyze table '||p_owner||'.'||p_table||' compute statistics';
+
+  select round(blocks*8-blocks*(avg_space/1000),1),
+  (blocks+empty_blocks)*8 into p_used,p_allocated
+  from dba_tables
+  where table_name = p_table;
+
+  dbms_output.put_line(p_table||'   '||p_allocated||' KB reservados, '||p_used||' KB usados');
+
+end infoTableSize;
+
+end infoUserSpace;
+/
+
+exec infoUserSpace.execute('usuario');
+
+SQL> exec infoUserSpace.execute('usuario');
+BEGIN infoUserSpace.execute('usuario'); END;
+
+ERROR at line 1:
+ORA-20001: User does not exist
+ORA-06512: at "SYS.INFOUSERSPACE", line 26
+ORA-06512: at "SYS.INFOUSERSPACE", line 9
+ORA-06512: at line 1
+
+exec infoUserSpace.execute('SERGIO');
+
+SQL> exec infoUserSpace.execute('SERGIO')
+Usuario: SERGIO
+Archivo: /u01/app/oracle/oradata/orcl/users01.dbf
+SOCIOS_POR_ASOCIACIONES   64 KB reservados, 1.1 KB usados
+ASOCIACIONES              64 KB reservados, .3 KB usados
+SOCIOS	                  64 KB reservados, 1.1 KB usados
+Total Espacio en Archivo /u01/app/oracle/oradata/orcl/users01.dbf: 192 KB reservados, 2.5 KB usados
+Total Espacio Usuario en la BD:                                    192 KB reservados, 2.5 KB usados
+
+PL/SQL procedure successfully completed.

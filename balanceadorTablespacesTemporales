@@ -1,0 +1,223 @@
+Procedimiento llamado MostrarUsrsCuotaIlimitada que muestre los usuarios que puedan escribir de forma ilimitada en más de uno de los tablespaces que cuentan con ficheros en la unidad C:
+
+comprobaciones previas:
+
+- obtener tamaño de bloque
+
+[root@oraclb oracle]# blockdev --getbsz /dev/sda2
+4096
+
+- tabla temporal para añadir uso en tablespace temporal
+
+DROP TABLE Regiones CASCADE CONSTRAINTS;
+CREATE global temporary TABLE Regiones(Codigo VARCHAR2(4),Nombre VARCHAR2(30),PoblacionInfantil NUMBER(8),PoblacionAdulta NUMBER(8),Idioma VARCHAR2(15),Pais VARCHAR2(20),CONSTRAINT pk_regiones PRIMARY KEY(Codigo),CONSTRAINT ck_nombre UNIQUE(Nombre));
+
+insert into regiones values('98','Bouenza','87345','202653','suajili','Congo');
+insert into regiones values('104','Sindhupalchowk','54681','233117','nepali','Nepal');
+insert into regiones values('111','Crimea','354024','1612777','ruso','Ucrania');
+insert into regiones values('112','Hurunui','2170','10530','ingles','Nueva Zelanda');
+insert into regiones values('115','Rieti','26560','120990','italiano','Italia');
+insert into regiones values('117','Puerto Plata','62850','267934','castellano','República Dominicana');
+insert into regiones values('121','Los Lagos','159813','681310','castellano','Chile');
+insert into regiones values('123','Butte','198803','21534','ingles','Estados Unidos');
+insert into regiones values('125','Junqali','258300','971700','ingles','Sudan del Sur');
+
+http://www.oracle-wiki.net/startsqldisplaytempspcuser
+
+- Estadisticas de tablespaces temporales
+
+select TABLESPACE_NAME,
+ROUND(sum(BYTES_USED+BYTES_FREE)/1024/1024,2) as Total,
+ROUND(BYTES_USED/1024/1024,2) as Used,
+ROUND(BYTES_FREE/1024/1024,2) as Free
+from V$TEMP_SPACE_HEADER
+where TABLESPACE_NAME !='TEMP'
+group by TABLESPACE_NAME,ROUND(BYTES_USED/1024/1024,2),ROUND(BYTES_FREE/1024/1024,2);
+
+- Uso de usuarios conectados en tablespaces temporales
+
+SET PAGESIZE 50
+SET LINESIZE 300
+COLUMN tablespace FORMAT A20
+COLUMN temp_size FORMAT A20
+COLUMN username FORMAT A20
+ 
+SELECT NVL(a.username, '(oracle)') AS username,
+       b.tablespace,
+       sum(ROUND(((b.blocks*p.value)/1024/1024),2))||'M' AS temp_size
+FROM   gv$session a,
+       gv$sort_usage b,
+       gv$parameter p
+WHERE  p.name  = 'db_block_size'
+AND    a.saddr = b.session_addr
+AND    a.inst_id=b.inst_id
+AND    a.inst_id=p.inst_id
+group by b.tablespace, NVL(a.username, '(oracle)');
+
+-Bloques libres en tablespaces temporales
+
+select tablespace_name, blocks_free
+from v$TEMP_SPACE_HEADER
+where blocks_free > 0
+order by blocks_free desc;
+
+-Tablespace temporal por defecto de suarios activos
+
+select username, temporary_tablespace
+from dba_users
+where username in(select USERNAME
+                 from V$SESSION
+                 where username not in ('NULL','SYS'));
+
+teoria sobre el ejercicio:
+
+Los tablespaces temporales son usados para operaciones en las que se necesita ordenar las filas, por ejemplo:
+- uso de order_by,group_by,union,intersection,minus,distinct
+- creación de un indice
+- creacion de tablas temporales
+
+Para ajustar el rendimiento en estas operaciones se pueden usar dos parámetros
+- sort_area_size: cantidad máxima de memoria usada para ordenaciones
+- sort_area_retained_size: umbral de memoria en el que se guardan estas ejecuciones para futuros usos
+
+Si la ordenacion es pequeña se ejecuta en la memoria reservada 'sort_area_size' para cada usuario con una sesion abierta, si ese espacio no fuera suficiente se hace uso de los tablespaces temporales (conlleva un mayor uso de operaciones de lectura/escritura en disco disminuyendo el rendimiento de la base de datos).
+
+Uso de 'tablespace groups'
+
+En lugar de asignar un usuario a un tablespace temporal se puede añadir a un grupo de tablespaces que le permite usar varios tablespaces temporales diferentes en la misma sesion (que pueden ser creardos/eliminados a demanda) y la ejecucion en paralelo de este tipo de ordenes sobre diferentes discos aumentando el rendimiento a la vez que se sigue manteniendo en los tablespaces temporales iniciales las ejecuciones mas usadas para su posterior uso.
+
+Es normal encontrar un tablespace temporal lleno lo cual no significa que no quede espacio para ser usado. Oracle no borra el contenido (para poder ser reutilizado) en su lugar lo marca como disponible para ser reescrito. En caso de quedar sin espacio realmente en el tablespace temporal se recibirá el error 'ORA-01652 unable to extend temp segment'
+
+Teniendo esto en cuenta en lugar de comprobar el espacio libre en los tablespaces temporales se hará un reparto equitativo del espacio disponible entre los usuarios con una sesion activa. No se tiene en cuenta cuenta las diferentes necesidades de cada usuario o donde reside cada tablespace temporal para optimizar los procesos de lectura/escritura a disco.
+
+Algoritmo de balanceador de tablespaces
+
+- registrar nombre y tamaño de los tablespaces ordenados por tamaño y obtener valor medio del tamaño de estos
+- listar usuarios conectados y añadirlos al mayor tablespace disponible en cada momento (restando el valor medio a ese tablespace en cada iteracion, si llega al último tablespace vuelve a comenzar por el primero)
+- otorgar tablespace temporal por defecto a los usuarios
+
+
+create or replace package tempLoadBalancer
+as
+  TYPE infoTS is record
+  (
+      tsName     dba_tablespaces.tablespace_name%type,
+      tsSize     number
+  );
+  TYPE tableinfoTS is table of infoTS
+      index by binary_integer;
+  TableTS tableinfoTS;
+
+  procedure dataBalancer;
+  procedure repartirTS(p_number number);
+
+end tempLoadBalancer;
+/
+
+create or replace package body tempLoadBalancer
+as
+
+procedure dataBalancer
+is
+
+  v_index number := 0;
+  v_sum number :=0;
+  v_media number :=0;
+
+  cursor c_sizeTS is
+  select TABLESPACE_NAME,
+  ROUND(sum(BYTES_USED+BYTES_FREE)/1024/1024,2) as Total
+  from V$TEMP_SPACE_HEADER
+  where TABLESPACE_NAME !='TEMP'
+  group by TABLESPACE_NAME
+  order by Total desc;
+
+begin
+
+  for TS in c_sizeTS loop
+   TableTS(v_index).tsName := TS.tablespace_name;
+   TableTS(v_index).tsSize := TS.Total;
+   v_sum := v_sum + TS.Total;
+   v_index := v_index + 1;
+  end loop;
+
+  v_media:=round(v_sum/v_index);
+
+  repartirTS(v_media);
+
+end dataBalancer;
+
+procedure repartirTS(p_number number)
+is
+
+  cursor c_activeUsers is
+  select USERNAME from V$SESSION where username not in ('NULL','SYS');
+
+  v_indice number;
+
+begin
+
+  v_indice := TableTS.first;
+
+  for user in c_activeUsers loop
+    dbms_output.put_line(user.username||' al tablespace '||TableTS(v_indice).tsName);
+    execute immediate 'ALTER USER '||user.username||' TEMPORARY TABLESPACE '||TableTS(v_indice).tsName;
+    TableTS(v_indice).tsSize := TableTS(v_indice).tsSize - p_number;
+    if v_indice = TableTS.last then
+      v_indice := 0;
+    elsif TableTS(v_indice).tsSize < TableTS(v_indice+1).tsSize then
+      v_indice := v_indice + 1;
+    end if;
+  end loop;
+
+  end repartirTS;
+
+end tempLoadBalancer;
+/
+
+- estado de los tablespaces temporales creados para las pruebas:
+
+SQL> select TABLESPACE_NAME,
+ROUND(sum(BYTES_USED+BYTES_FREE)/1024/1024,2) as Total,
+ROUND(BYTES_USED/1024/1024,2) as Used,
+ROUND(BYTES_FREE/1024/1024,2) as Free
+from V$TEMP_SPACE_HEADER
+where TABLESPACE_NAME !='TEMP'
+group by TABLESPACE_NAME,ROUND(BYTES_USED/1024/1024,2),ROUND(BYTES_FREE/1024/1024,2);
+
+TABLESPACE_NAME 		    TOTAL	USED	   FREE
+------------------------------ ---------- ---------- ----------
+TEMP_TB 				5	   4	      1
+TEMP_TB2				5	   4	      1
+TEMP_TB3			       15	   1	     14
+
+SQL> select username, temporary_tablespace
+from dba_users
+where username in(select USERNAME
+                 from V$SESSION
+                 where username not in ('NULL','SYS')); 
+
+USERNAME	     TEMPORARY_TABLESPACE
+-------------------- ------------------------------
+JUANMA		     TEMP_TB
+SERGIO		     TEMP_TB
+ALVARO		     TEMP_TB
+
+SQL> exec tempLoadBalancer.dataBalancer;
+ALVARO al tablespace TEMP_TB3
+JUANMA al tablespace TEMP_TB3
+SERGIO al tablespace TEMP_TB
+
+PL/SQL procedure successfully completed.
+
+SQL> select username, temporary_tablespace
+from dba_users
+where username in(select USERNAME
+                 from V$SESSION
+                 where username not in ('NULL','SYS'));
+
+USERNAME	     TEMPORARY_TABLESPACE
+-------------------- ------------------------------
+JUANMA		     TEMP_TB3
+SERGIO		     TEMP_TB
+ALVARO		     TEMP_TB3

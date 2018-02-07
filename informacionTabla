@@ -1,0 +1,115 @@
+Procedimiento llamado InformeRestricciones que reciba el nombre de una tabla y muestre los nombres de las restricciones que tiene, a qué columna o columnas afectan y en qué consisten exactamente.
+
+
+create or replace package constraintInfo
+as
+
+  procedure tableInfo(p_table VARCHAR2);
+  procedure getConstraints(p_table varchar2);
+  procedure infoForeignKey(p_table varchar2,p_columnName varchar2);
+
+end constraintInfo;
+/
+
+create or replace package body constraintInfo
+as
+
+procedure tableInfo(p_table VARCHAR2)
+is
+
+c_table number;
+
+begin
+
+  select count(*) into c_table
+  from dba_tables
+  where table_name = p_table;
+
+  if c_table=0 then
+    raise_application_error(-20001,'Table does not exist');
+  end if;
+
+  getConstraints(p_table);
+
+end tableInfo;
+
+procedure getConstraints(p_table varchar2)
+is
+
+  cursor c_contraints is
+  select distinct dcc.CONSTRAINT_NAME,COLUMN_NAME,SEARCH_CONDITION_VC,decode(CONSTRAINT_TYPE, 'C', 'check',
+                                                                                              'R', 'foreign key',
+                                                                                              'U', 'unique key',
+                                                                                              'P', 'primary key') CONSTRAINT_TYPE
+  from DBA_CONS_COLUMNS dcc,dba_constraints dc
+  where dcc.CONSTRAINT_NAME=dc.CONSTRAINT_NAME
+  and dc.table_name=p_table
+  order by dcc.CONSTRAINT_NAME;
+
+begin
+
+dbms_output.put_line(rpad('Name',20)||rpad('Column',20)||rpad('Type',12)||'Info');
+
+for restriccion in c_contraints loop
+  if restriccion.CONSTRAINT_TYPE = 'foreign key' then
+    infoForeignKey(p_table,restriccion.COLUMN_NAME);
+  elsif restriccion.CONSTRAINT_TYPE = 'check' then
+    dbms_output.put_line(rpad(restriccion.CONSTRAINT_NAME,20)||rpad(restriccion.COLUMN_NAME,20)||rpad(restriccion.CONSTRAINT_TYPE,12)||restriccion.SEARCH_CONDITION_VC);
+  else
+    dbms_output.put_line(rpad(restriccion.CONSTRAINT_NAME,20)||rpad(restriccion.COLUMN_NAME,20)||rpad(restriccion.CONSTRAINT_TYPE,12));
+  end if;
+end loop;
+
+end getConstraints;
+
+procedure infoForeignKey(p_table varchar2,p_columnName varchar2)
+is
+
+  v_columnName varchar2(30);
+  v_tableName varchar2(30);
+  v_keyName varchar2(30);
+  v_constraintName varchar2(30);
+
+begin
+
+  SELECT a.constraint_name,a.column_name,c_fk.table_name,c_fk.index_name into v_constraintName,v_columnName, v_tableName, v_keyName
+  FROM dba_cons_columns a
+  JOIN dba_constraints c ON a.owner = c.owner
+  AND a.constraint_name = c.constraint_name
+  JOIN dba_constraints c_fk ON c.r_owner = c_fk.owner
+  AND c.r_constraint_name = c_fk.constraint_name
+  WHERE c.constraint_type = 'R'
+  AND a.table_name = p_table
+  AND a.column_name = p_columnName;
+
+  dbms_output.put_line(rpad(v_constraintName,20)||rpad(v_columnName,20)||'foreign key '||v_tableName||': '||v_keyName);
+
+end infoForeignKey;
+
+end constraintInfo;
+/
+
+
+exec constraintInfo.tableInfo('SOCIOS_POR_ASOCIACIONES');
+
+SQL> exec constraintInfo.tableInfo('SOCIOS_POR_ASOCIACIONES');
+Name		    Column		Type	    Info
+CUOTA_OK	    CUOTA_ANUAL 	check	    Cuota_Anual<3000
+FK_ASOCIACION	    CIFASOCIACION	foreign key ASOCIACIONES: PK_ASOCIACIONES
+FK_SOCIO	    DNISOCIO		foreign key SOCIOS: PK_SOCIOS
+PERIOCIDAD_OK	    PERIOCIDADPAGOS	check	    PeriocidadPagos in('Mensual','Bimestral','Trimestral','Semestral','Anual')
+PK_SOCIOSASOCIACION CIFASOCIACION	primary key
+PK_SOCIOSASOCIACION DNISOCIO		primary key
+
+PL/SQL procedure successfully completed.
+
+exec constraintInfo.tableInfo('ANARCARDOS');
+
+SQL> exec constraintInfo.tableInfo('ANARCARDOS');
+BEGIN constraintInfo.tableInfo('ANARCARDOS'); END;
+
+*
+ERROR at line 1:
+ORA-20001: Table does not exist
+ORA-06512: at "SYS.CONSTRAINTINFO", line 20
+ORA-06512: at line 1
