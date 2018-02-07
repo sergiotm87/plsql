@@ -1,0 +1,32 @@
+create or replace procedure PermisosdeAsobreB(p_usuario varchar2,p_propietario varchar2)
+is
+
+  cursor c_permisos is
+  select 'ROLE' type,grantee grantee,granted_role priv,'-' tablnm,'-' colnm,'-' owner
+  from dba_role_privs
+  where grantee = p_usuario
+  union
+  select 'TABLE' type,grantee grantee,privilege priv,table_name tablnm,'-' colnm,owner owner
+  from dba_tab_privs
+  where grantee = p_usuario
+  and owner=p_propietario
+  union
+  select 'COLUMN' type,grantee grantee,privilege priv,table_name tablnm,column_name colnm,owner owner
+  from dba_col_privs
+  where grantee = p_usuario
+  and owner=p_propietario;
+
+begin
+
+  for permiso in c_permisos loop
+    if permiso.type='ROLE' then
+      PermisosdeAsobreB(permiso.priv,p_propietario);
+    elsif permiso.type='TABLE' then
+      dbms_output.put_line('grantee: '||permiso.grantee||' privilege: '||permiso.priv||' table: '||permiso.tablnm||' owner:'||permiso.owner);
+    elsif permiso.type='COLUMN' then
+      dbms_output.put_line('grantee: '||permiso.grantee||' privilege: '||permiso.priv||' table: '||permiso.tablnm||' column: '||permiso.colnm||' owner:'||permiso.owner);
+    end if;
+  end loop;
+
+end PermisosdeAsobreB;
+/
